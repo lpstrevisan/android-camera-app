@@ -1,0 +1,22 @@
+R_DEF: Internal format may change without notice
+local
+color accent_cyan
+color accent_green
+color black
+color dark_bg
+color surface_card
+color text_secondary
+color white
+id textureView
+id tvCameraInfo
+id tvCaptureCount
+id tvEndpoints
+id tvIpAddress
+id tvServerStatus
+layout activity_main
+string app_name
+string camera_starting
+string ip_label_placeholder
+string permission_rationale
+string server_starting
+style Theme.CamApp

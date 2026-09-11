@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="accent_cyan">#00E5FF</color>
+    <color name="accent_green">#00E676</color>
+    <color name="black">#FF000000</color>
+    <color name="dark_bg">#121212</color>
+    <color name="surface_card">#1E1E1E</color>
+    <color name="text_secondary">#B0BEC5</color>
+    <color name="white">#FFFFFFFF</color>
+    <string name="app_name">Headless IP Camera</string>
+    <string name="camera_starting">Initializing Camera2 Manual Mode...</string>
+    <string name="ip_label_placeholder">Server URL: http://0.0.0.0:8080</string>
+    <string name="permission_rationale">Camera permission is required to operate the IP Camera.</string>
+    <string name="server_starting">Starting HTTP server...</string>
+    <style name="Theme.CamApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/accent_cyan</item>
+        <item name="colorPrimaryVariant">@color/accent_green</item>
+        <item name="colorOnPrimary">@color/black</item>
+        <item name="android:windowBackground">@color/dark_bg</item>
+        <item name="android:statusBarColor">@color/dark_bg</item>
+    </style>
+</resources>

@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Headless IP Camera</string>
+    <string name="server_starting">Starting HTTP server...</string>
+    <string name="camera_starting">Initializing Camera2 Manual Mode...</string>
+    <string name="ip_label_placeholder">Server URL: http://0.0.0.0:8080</string>
+    <string name="permission_rationale">Camera permission is required to operate the IP Camera.</string>
+</resources>
