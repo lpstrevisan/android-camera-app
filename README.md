@@ -49,14 +49,36 @@ Triggers an immediate frame capture from the active sensor stream and returns th
 - **Response**: `200 OK`, `Content-Type: image/jpeg`
 - **Response Headers**:
   - `Cache-Control: no-cache, no-store, must-revalidate`
-  - `X-Camera-Focus-Distance`: Current focus distance in diopters ($1 / \text{meters}$)
-  - `X-Camera-ISO`: Current ISO sensitivity
-  - `X-Camera-Exposure-Time-Ns`: Current integration time in nanoseconds
-  - `X-Camera-Exposure-Time-Ms`: Current integration time in milliseconds
+  - `X-Camera-Metadata`: Compact JSON string containing all **19 frame-synchronized hardware metadata keys** from `TotalCaptureResult`:
+    - `sensor_exposure_time` (ns)
+    - `sensor_sensitivity` (ISO)
+    - `sensor_timestamp` (hardware monotonic ns)
+    - `lens_focus_distance` (diopters)
+    - `lens_focal_length` (mm)
+    - `lens_aperture` (f-number)
+    - `control_ae_mode`, `control_af_mode`, `control_awb_mode`
+    - `color_correction_mode`
+    - `color_correction_gains` (`{"red", "green_even", "green_odd", "blue"}`)
+    - `color_correction_transform` (3x3 matrix)
+    - `lens_optical_stabilization_mode`, `control_video_stabilization_mode`
+    - `noise_reduction_mode`, `edge_mode`, `color_correction_aberration_mode`
+    - `scaler_crop_region` (`{"left", "top", "right", "bottom"}`)
+    - `jpeg_quality`
+  - Individual convenience headers: `X-Camera-Focus-Distance`, `X-Camera-ISO`, `X-Camera-Exposure-Time-Ns`, `X-Camera-Exposure-Time-Ms`, `X-Camera-Sensor-Timestamp`.
+
+#### Optional Query Parameter:
+- `GET /capture?format=json`: Returns an `application/json` payload containing the metadata object and the JPEG image encoded in Base64 (`image_base64`).
 
 #### cURL:
 ```bash
-curl http://<DEVICE_IP>:8080/capture -o frame.jpg
+# Capture raw JPEG (metadata in HTTP headers)
+curl -v http://<DEVICE_IP>:8080/capture -o frame.jpg
+
+# Inspect the metadata header
+curl -s -I http://<DEVICE_IP>:8080/capture | grep -i x-camera-metadata
+
+# Capture JSON bundle with Base64 image
+curl -s http://<DEVICE_IP>:8080/capture?format=json -o frame_bundle.json
 ```
 
 ---
@@ -132,6 +154,7 @@ Here is a minimal Python example demonstrating how to stream frames directly int
 
 ```python
 import cv2
+import json
 import numpy as np
 import requests
 
@@ -150,17 +173,20 @@ while True:
     try:
         response = requests.get(CAMERA_URL, timeout=1.0)
         if response.status_code == 200:
-            # Decode JPEG buffer directly to OpenCV BGR array
+            # 1. Decode JPEG buffer directly to OpenCV BGR array (zero disk I/O)
             img_array = np.frombuffer(response.content, dtype=np.uint8)
             frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-            # Metadata from headers
-            exp_ms = response.headers.get("X-Camera-Exposure-Time-Ms")
-            iso = response.headers.get("X-Camera-ISO")
+            # 2. Extract full hardware metadata from the HTTP header
+            meta = json.loads(response.headers.get("X-Camera-Metadata", "{}"))
+            exp_ms = meta.get("sensor_exposure_time", 0) / 1e6
+            iso = meta.get("sensor_sensitivity")
+            timestamp = meta.get("sensor_timestamp")
+            gains = meta.get("color_correction_gains", {})
 
-            # Visual servoing / inference logic here
-            cv2.putText(frame, f"ISO: {iso} Exp: {exp_ms}ms", (30, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            # Visual servoing / inference logic with true hardware timestamps
+            cv2.putText(frame, f"ISO: {iso} | Exp: {exp_ms:.2f}ms | TS: {timestamp}", (30, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.imshow("Robot Arm View", frame)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):

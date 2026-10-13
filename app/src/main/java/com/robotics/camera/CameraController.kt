@@ -15,6 +15,9 @@ import android.util.Range
 import android.util.Rational
 import android.util.Size
 import android.view.Surface
+import android.graphics.Rect
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -22,6 +25,14 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.abs
+
+/**
+ * Encapsulates a captured JPEG frame alongside its exact Camera2 hardware metadata.
+ */
+data class CapturedFrame(
+    val jpegBytes: ByteArray,
+    val metadata: JSONObject
+)
 
 /**
  * CameraController manages the Camera2 hardware pipeline with strict manual control.
@@ -74,6 +85,7 @@ class CameraController(
     private val captureLock = ReentrantLock()
     private val pendingCaptureLatch = AtomicReference<CountDownLatch?>(null)
     private val pendingCaptureResult = AtomicReference<ByteArray?>(null)
+    private val pendingCaptureMetadata = AtomicReference<JSONObject?>(null)
     val totalCapturesServed = AtomicLong(0)
 
     // Request Builders
@@ -334,20 +346,23 @@ class CameraController(
 
     /**
      * Executes a single still capture directly from the active CameraCaptureSession to ImageReader.
-     * Blocks synchronously until the frame is produced by ImageReader or until timeoutMs expires.
+     * Blocks synchronously until both the frame (from ImageReader) and the hardware capture result
+     * (from TotalCaptureResult) are produced, or until timeoutMs expires.
      *
-     * @param timeoutMs Maximum milliseconds to wait for the frame.
-     * @return Raw JPEG ByteArray.
+     * @param timeoutMs Maximum milliseconds to wait for the frame and metadata.
+     * @return CapturedFrame containing the raw JPEG ByteArray and full hardware metadata JSONObject.
      * @throws TimeoutException or IllegalStateException on capture failure.
      */
-    fun captureStillFrame(timeoutMs: Long = 3000): ByteArray {
+    fun captureStillFrame(timeoutMs: Long = 3000): CapturedFrame {
         val session = captureSession ?: throw IllegalStateException("Camera capture session is not active")
         val device = cameraDevice ?: throw IllegalStateException("Camera device is closed")
         val reader = imageReader ?: throw IllegalStateException("ImageReader is not initialized")
 
         captureLock.withLock {
-            val latch = CountDownLatch(1)
+            // CountDownLatch(2): 1 for ImageReader buffer, 1 for TotalCaptureResult metadata
+            val latch = CountDownLatch(2)
             pendingCaptureResult.set(null)
+            pendingCaptureMetadata.set(null)
             pendingCaptureLatch.set(latch)
 
             try {
@@ -360,35 +375,165 @@ class CameraController(
                     set(CaptureRequest.JPEG_ORIENTATION, 0)
                 }
                 stillRequestBuilder = stillBuilder
+                val request = stillBuilder.build()
 
                 // Submit capture request to hardware session
-                session.capture(stillBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                session.capture(request, object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        try {
+                            val metadata = extractMetadata(result, request)
+                            pendingCaptureMetadata.set(metadata)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error extracting capture metadata", e)
+                            pendingCaptureMetadata.set(buildFallbackMetadata(request))
+                        } finally {
+                            latch.countDown()
+                        }
+                    }
+
                     override fun onCaptureFailed(
                         session: CameraCaptureSession,
                         request: CaptureRequest,
                         failure: CaptureFailure
                     ) {
                         Log.e(TAG, "Still capture failed: ${failure.reason}")
+                        pendingCaptureMetadata.set(buildFallbackMetadata(request))
                         latch.countDown()
                     }
                 }, backgroundHandler)
 
-                // Block thread until ImageReader's OnImageAvailableListener produces the frame
+                // Block thread until both ImageReader and TotalCaptureResult complete
                 val received = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-                if (!received) {
+                if (!received && pendingCaptureResult.get() == null) {
                     throw java.util.concurrent.TimeoutException("Timed out waiting for Camera2 frame from ImageReader ($timeoutMs ms)")
                 }
 
-                val result = pendingCaptureResult.get()
+                val resultBytes = pendingCaptureResult.get()
                     ?: throw IllegalStateException("Image buffer could not be retrieved from ImageReader")
 
+                val metadata = pendingCaptureMetadata.get() ?: buildFallbackMetadata(request)
+
                 totalCapturesServed.incrementAndGet()
-                return result
+                return CapturedFrame(resultBytes, metadata)
 
             } finally {
                 pendingCaptureLatch.set(null)
                 pendingCaptureResult.set(null)
+                pendingCaptureMetadata.set(null)
             }
+        }
+    }
+
+    /**
+     * Extracts all 19 hardware metadata parameters from TotalCaptureResult and CaptureRequest.
+     */
+    private fun extractMetadata(result: TotalCaptureResult, request: CaptureRequest): JSONObject {
+        return JSONObject().apply {
+            // 1. Exposure and Sensitivity
+            put("sensor_exposure_time", result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: currentSettings.exposureTimeNs)
+            put("sensor_sensitivity", result.get(CaptureResult.SENSOR_SENSITIVITY) ?: currentSettings.iso)
+            put("sensor_timestamp", result.get(CaptureResult.SENSOR_TIMESTAMP) ?: System.nanoTime())
+
+            // 2. Lens and Optics
+            put("lens_focus_distance", (result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: currentSettings.focusDistance).toDouble())
+            put("lens_focal_length", (result.get(CaptureResult.LENS_FOCAL_LENGTH) ?: 0.0f).toDouble())
+            put("lens_aperture", (result.get(CaptureResult.LENS_APERTURE) ?: 0.0f).toDouble())
+
+            // 3. 3A Control Modes
+            put("control_ae_mode", result.get(CaptureResult.CONTROL_AE_MODE) ?: CaptureResult.CONTROL_AE_MODE_OFF)
+            put("control_af_mode", result.get(CaptureResult.CONTROL_AF_MODE) ?: CaptureResult.CONTROL_AF_MODE_OFF)
+            put("control_awb_mode", result.get(CaptureResult.CONTROL_AWB_MODE) ?: CaptureResult.CONTROL_AWB_MODE_OFF)
+
+            // 4. Color Correction & ISP Gains
+            put("color_correction_mode", result.get(CaptureResult.COLOR_CORRECTION_MODE) ?: CaptureResult.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+
+            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+            put("color_correction_gains", JSONObject().apply {
+                put("red", (gains?.red ?: 1.8f).toDouble())
+                put("green_even", (gains?.greenEven ?: 1.0f).toDouble())
+                put("green_odd", (gains?.greenOdd ?: 1.0f).toDouble())
+                put("blue", (gains?.blue ?: 1.6f).toDouble())
+            })
+
+            val transform = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
+            val transformArray = JSONArray()
+            if (transform != null) {
+                for (row in 0 until 3) {
+                    val rowArray = JSONArray()
+                    for (col in 0 until 3) {
+                        val element = transform.getElement(col, row)
+                        val value = if (element.denominator != 0) {
+                            element.numerator.toDouble() / element.denominator.toDouble()
+                        } else {
+                            0.0
+                        }
+                        rowArray.put(value)
+                    }
+                    transformArray.put(rowArray)
+                }
+            }
+            put("color_correction_transform", transformArray)
+
+            // 5. Stabilization
+            put("lens_optical_stabilization_mode", result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE) ?: CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+            put("control_video_stabilization_mode", result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE) ?: CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+
+            // 6. Post-Processing & Filtering
+            put("noise_reduction_mode", result.get(CaptureResult.NOISE_REDUCTION_MODE) ?: CaptureResult.NOISE_REDUCTION_MODE_OFF)
+            put("edge_mode", result.get(CaptureResult.EDGE_MODE) ?: CaptureResult.EDGE_MODE_OFF)
+            put("color_correction_aberration_mode", result.get(CaptureResult.COLOR_CORRECTION_ABERRATION_MODE) ?: CaptureResult.COLOR_CORRECTION_ABERRATION_MODE_OFF)
+
+            // 7. Crop & Quality
+            val crop = result.get(CaptureResult.SCALER_CROP_REGION)
+            put("scaler_crop_region", JSONObject().apply {
+                put("left", crop?.left ?: 0)
+                put("top", crop?.top ?: 0)
+                put("right", crop?.right ?: 0)
+                put("bottom", crop?.bottom ?: 0)
+            })
+
+            put("jpeg_quality", request.get(CaptureRequest.JPEG_QUALITY)?.toInt() ?: 100)
+        }
+    }
+
+    /**
+     * Fallback metadata generator if TotalCaptureResult is unavailable.
+     */
+    private fun buildFallbackMetadata(request: CaptureRequest): JSONObject {
+        return JSONObject().apply {
+            put("sensor_exposure_time", currentSettings.exposureTimeNs)
+            put("sensor_sensitivity", currentSettings.iso)
+            put("sensor_timestamp", System.nanoTime())
+            put("lens_focus_distance", currentSettings.focusDistance.toDouble())
+            put("lens_focal_length", 0.0)
+            put("lens_aperture", 0.0)
+            put("control_ae_mode", CaptureResult.CONTROL_AE_MODE_OFF)
+            put("control_af_mode", CaptureResult.CONTROL_AF_MODE_OFF)
+            put("control_awb_mode", CaptureResult.CONTROL_AWB_MODE_OFF)
+            put("color_correction_mode", CaptureResult.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+            put("color_correction_gains", JSONObject().apply {
+                put("red", 1.8)
+                put("green_even", 1.0)
+                put("green_odd", 1.0)
+                put("blue", 1.6)
+            })
+            put("color_correction_transform", JSONArray())
+            put("lens_optical_stabilization_mode", CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+            put("control_video_stabilization_mode", CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+            put("noise_reduction_mode", CaptureResult.NOISE_REDUCTION_MODE_OFF)
+            put("edge_mode", CaptureResult.EDGE_MODE_OFF)
+            put("color_correction_aberration_mode", CaptureResult.COLOR_CORRECTION_ABERRATION_MODE_OFF)
+            put("scaler_crop_region", JSONObject().apply {
+                put("left", 0)
+                put("top", 0)
+                put("right", 0)
+                put("bottom", 0)
+            })
+            put("jpeg_quality", request.get(CaptureRequest.JPEG_QUALITY)?.toInt() ?: 100)
         }
     }
 

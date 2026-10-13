@@ -35,7 +35,7 @@ class HttpServer(
         return try {
             when {
                 // 1. FRAME CAPTURE ENDPOINT
-                method == Method.GET && uri == "/capture" -> handleCaptureRequest()
+                method == Method.GET && uri == "/capture" -> handleCaptureRequest(session)
 
                 // 2. DYNAMIC CONFIGURATION ENDPOINT
                 method == Method.POST && uri == "/config" -> handleConfigRequest(session)
@@ -65,12 +65,36 @@ class HttpServer(
 
     /**
      * Handles GET /capture:
-     * Blocks until the Camera2 pipeline produces a manual frame, then streams it back.
+     * Blocks until the Camera2 pipeline produces a manual frame and hardware metadata.
+     * Injects all 19 hardware metadata parameters into the 'X-Camera-Metadata' header.
+     * Optionally returns a JSON bundle with Base64 image if ?format=json is passed.
      */
-    private fun handleCaptureRequest(): Response {
+    private fun handleCaptureRequest(session: IHTTPSession): Response {
         return try {
-            val jpegBytes = cameraController.captureStillFrame(timeoutMs = 4000)
+            val capturedFrame = cameraController.captureStillFrame(timeoutMs = 4000)
+            val jpegBytes = capturedFrame.jpegBytes
+            val metadataJson = capturedFrame.metadata
 
+            // Optional: return full JSON bundle with Base64 image when ?format=json is requested
+            val formatParam = session.parameters["format"]?.firstOrNull()
+            if (formatParam.equals("json", ignoreCase = true)) {
+                val base64Image = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
+                val bundleJson = JSONObject().apply {
+                    put("status", "success")
+                    put("metadata", metadataJson)
+                    put("image_base64", base64Image)
+                }
+                val jsonResponse = newFixedLengthResponse(
+                    Response.Status.OK,
+                    MIME_JSON,
+                    bundleJson.toString()
+                )
+                jsonResponse.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+                onCaptureServedListener?.invoke(cameraController.totalCapturesServed.get())
+                return jsonResponse
+            }
+
+            // Default: Raw JPEG stream with complete metadata in X-Camera-Metadata header
             val response = newFixedLengthResponse(
                 Response.Status.OK,
                 MIME_JPEG,
@@ -83,12 +107,16 @@ class HttpServer(
             response.addHeader("Pragma", "no-cache")
             response.addHeader("Expires", "0")
 
-            // Embed active sensor metadata in HTTP headers
-            val settings = cameraController.currentSettings
-            response.addHeader("X-Camera-Focus-Distance", settings.focusDistance.toString())
-            response.addHeader("X-Camera-ISO", settings.iso.toString())
-            response.addHeader("X-Camera-Exposure-Time-Ns", settings.exposureTimeNs.toString())
-            response.addHeader("X-Camera-Exposure-Time-Ms", (settings.exposureTimeNs / 1_000_000.0).toString())
+            // 1. INJECT COMPLETE HARDWARE METADATA JSON IN HEADER
+            response.addHeader("X-Camera-Metadata", metadataJson.toString())
+
+            // 2. Individual convenience headers for backward compatibility
+            val expNs = metadataJson.optLong("sensor_exposure_time", cameraController.currentSettings.exposureTimeNs)
+            response.addHeader("X-Camera-Focus-Distance", metadataJson.optDouble("lens_focus_distance").toString())
+            response.addHeader("X-Camera-ISO", metadataJson.optInt("sensor_sensitivity").toString())
+            response.addHeader("X-Camera-Exposure-Time-Ns", expNs.toString())
+            response.addHeader("X-Camera-Exposure-Time-Ms", (expNs / 1_000_000.0).toString())
+            response.addHeader("X-Camera-Sensor-Timestamp", metadataJson.optLong("sensor_timestamp").toString())
 
             onCaptureServedListener?.invoke(cameraController.totalCapturesServed.get())
             response
