@@ -55,6 +55,7 @@ Triggers an immediate frame capture from the active sensor stream and returns th
     - `sensor_timestamp` (hardware monotonic ns)
     - `lens_focus_distance` (diopters)
     - `lens_focal_length` (mm)
+    - `lens_intrinsic_calibration` (`[fx, fy, cx, cy, skew]`, when provided by the HAL)
     - `lens_aperture` (f-number)
     - `control_ae_mode`, `control_af_mode`, `control_awb_mode`
     - `color_correction_mode`

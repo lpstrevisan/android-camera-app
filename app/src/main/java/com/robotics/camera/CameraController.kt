@@ -71,6 +71,7 @@ class CameraController(
     private var exposureRange: Range<Long>? = null
     private var isoRange: Range<Int>? = null
     private var minFocusDistance: Float = 0.0f // In diopters (1/meters). 0.0 = infinity.
+    private var lensIntrinsicCalibration: FloatArray? = null
 
     // Active Manual Settings
     @Volatile
@@ -140,8 +141,16 @@ class CameraController(
             isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
             exposureRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
             minFocusDistance = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0.0f
+            lensIntrinsicCalibration = chars.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
 
-            Log.i(TAG, "Camera $cameraId selected. ISO Range: $isoRange, Exposure Range: $exposureRange, Max Focus Diopter: $minFocusDistance")
+            Log.i(
+                TAG,
+                "Camera $cameraId selected. ISO Range: $isoRange, " +
+                    "Exposure Range: $exposureRange, " +
+                    "Max Focus Diopter: $minFocusDistance, " +
+                    "Lens Intrinsic Calibration: " +
+                    (lensIntrinsicCalibration?.contentToString() ?: "unavailable")
+            )
 
             // Clamp initial settings to hardware limits
             currentSettings = clampSettings(currentSettings)
@@ -442,6 +451,9 @@ class CameraController(
             put("lens_focus_distance", (result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: currentSettings.focusDistance).toDouble())
             put("lens_focal_length", (result.get(CaptureResult.LENS_FOCAL_LENGTH) ?: 0.0f).toDouble())
             put("lens_aperture", (result.get(CaptureResult.LENS_APERTURE) ?: 0.0f).toDouble())
+            put("lens_intrinsic_calibration", JSONArray().apply {
+                lensIntrinsicCalibration?.forEach { put(it.toDouble()) }
+            })
 
             // 3. 3A Control Modes
             put("control_ae_mode", result.get(CaptureResult.CONTROL_AE_MODE) ?: CaptureResult.CONTROL_AE_MODE_OFF)
@@ -511,6 +523,9 @@ class CameraController(
             put("lens_focus_distance", currentSettings.focusDistance.toDouble())
             put("lens_focal_length", 0.0)
             put("lens_aperture", 0.0)
+            put("lens_intrinsic_calibration", JSONArray().apply {
+                lensIntrinsicCalibration?.forEach { put(it.toDouble()) }
+            })
             put("control_ae_mode", CaptureResult.CONTROL_AE_MODE_OFF)
             put("control_af_mode", CaptureResult.CONTROL_AF_MODE_OFF)
             put("control_awb_mode", CaptureResult.CONTROL_AWB_MODE_OFF)
